@@ -677,7 +677,7 @@ func (a *App) ParseFile(filePath string) (results []PageInfo, err error) {
 
 		if !page.Mat.Empty() {
 			fileName := fmt.Sprintf("img_%d_%d.png", timeStamp, i)
-			fullPath := filepath.Join(a.tempDir, fileName)
+			fullPath := filepath.Join(a.tempDir, "/local/", fileName)
 
 			if success := gocv.IMWrite(fullPath, page.Mat); success {
 				info.ImagePath = "/local/" + fileName
