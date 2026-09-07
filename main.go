@@ -14,13 +14,11 @@ import (
 var assets embed.FS
 
 func main() {
-	tempDir, err := os.MkdirTemp("", "OCR-Data-Studio")
-	cleanupTempDir := err == nil
+	dir, err := os.Getwd()
 	if err != nil {
-		tempDir = os.TempDir()
+		panic(err)
 	}
-
-	app := NewApp(tempDir)
+	app := NewApp(dir)
 
 	err = wails.Run(&options.App{
 		Title:     "OCR-Data-Studio",

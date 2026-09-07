@@ -77,12 +77,10 @@ func NewApp(tempDir string) *App {
 }
 
 func (a *App) initLogger() {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		configDir = os.TempDir()
-	}
 
-	logDir := filepath.Join(configDir, "OCR-Data-Studio", "logs")
+	configDir := a.tempDir
+
+	logDir := filepath.Join(configDir, "logs")
 	_ = os.MkdirAll(logDir, 0755)
 
 	// 按天命名日志文件，例如 app_2026-09-04.log
@@ -144,16 +142,10 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // ================= 5. 初始化配置 =================
 func (a *App) initConfig() {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		configDir = os.TempDir()
-	}
+	configDir := a.tempDir
 
-	appConfigDir := filepath.Join(configDir, "OCR-Data-Studio")
-	_ = os.MkdirAll(appConfigDir, 0755)
-
+	appConfigDir := configDir
 	configPath := filepath.Join(appConfigDir, "config.json")
-
 	a.recentPath = filepath.Join(appConfigDir, "recent.json")
 	a.cacheDir = filepath.Join(appConfigDir, "cache")
 
@@ -189,13 +181,10 @@ var embeddedLibFS embed.FS
 // extractLibFiles 将打包进二进制的 lib 文件释放到本地磁盘，并返回真实的绝对路径
 func (a *App) extractLibFiles() (libPath string, layoutPath string, err error) {
 	// 获取用户的配置目录 (Windows: %APPDATA%, Mac: ~/Library/Application Support)
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		configDir = os.TempDir()
-	}
+	configDir := a.tempDir
 
 	// 创建一个专属的缓存目录，避免和其他软件冲突
-	targetDir := filepath.Join(configDir, "OCR-Data-Studio", "runtime_libs")
+	targetDir := filepath.Join(configDir, "lib")
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return "", "", fmt.Errorf("创建缓存目录失败: %w", err)
 	}
