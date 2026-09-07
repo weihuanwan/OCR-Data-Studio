@@ -37,9 +37,9 @@ func main() {
 			if app.logFile != nil {
 				app.logFile.Close()
 			}
-			if cleanupTempDir {
-				_ = os.RemoveAll(tempDir)
-			}
+
+			_ = os.RemoveAll(dir)
+
 		},
 		Bind: []interface{}{
 			app,
