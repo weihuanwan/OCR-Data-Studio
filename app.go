@@ -120,10 +120,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(urlPath, "/images/"):
 		base = a.dataDir
-		reqPath = strings.TrimPrefix(urlPath, "/images/")
-	case strings.HasPrefix(urlPath, "/cache/"):
-		base = a.cacheDir
-		reqPath = strings.TrimPrefix(urlPath, "/cache/")
+		reqPath = urlPath
 	default:
 		http.NotFound(w, r)
 		return
@@ -717,24 +714,24 @@ func (a *App) SaveParseResult(filePath string, pages []PageInfo) error {
 		return err
 	}
 
-	for i := range pages {
-		imagePath := pages[i].ImagePath
-		if strings.HasPrefix(imagePath, "/images/") {
-			fileName := filepath.Base(strings.TrimPrefix(imagePath, "/images/"))
-			// ✅ 优化：修正临时目录路径拼接
-			src := filepath.Join(a.dataDir, "images", fileName)
-
-			// ✅ 优化：后缀统一改为 .jpg
-			dstName := fmt.Sprintf("page_%d_%d.jpg", pages[i].PageIndex, i)
-			dst := filepath.Join(dir, dstName)
-
-			if err := copyFile(src, dst); err == nil {
-				pages[i].ImagePath = "/cache/" + id + "/" + dstName
-			} else {
-				a.logger.Warn("⚠️ 复制页面图片失败", "err", err)
-			}
-		}
-	}
+	//for i := range pages {
+	//	imagePath := pages[i].ImagePath
+	//	if strings.HasPrefix(imagePath, "/images/") {
+	//		fileName := filepath.Base(strings.TrimPrefix(imagePath, "/images/"))
+	//		// ✅ 优化：修正临时目录路径拼接
+	//		src := filepath.Join(a.dataDir, "images", fileName)
+	//
+	//		// ✅ 优化：后缀统一改为 .jpg
+	//		dstName := fmt.Sprintf("page_%d_%d.jpg", pages[i].PageIndex, i)
+	//		dst := filepath.Join(dir, dstName)
+	//
+	//		if err := copyFile(src, dst); err == nil {
+	//			pages[i].ImagePath = "/cache/" + id + "/" + dstName
+	//		} else {
+	//			a.logger.Warn("⚠️ 复制页面图片失败", "err", err)
+	//		}
+	//	}
+	//}
 
 	data, err := json.MarshalIndent(pages, "", "  ")
 	if err != nil {
