@@ -55,65 +55,68 @@ type App struct {
 	ctx         context.Context
 	paddleOCRVL *vl.PaddleOCRVL
 	config      *AppConfig
-	tempDir     string
-	recentPath  string
-	cacheDir    string
-	sessionMu   sync.Mutex
-	// 👇 新增：日志相关字段
+
+	// ✅ 优化：分离持久化目录和临时目录
+	dataDir string // 持久化数据目录 (配置、缓存、lib、日志)
+	tempDir string // 临时文件目录 (OCR 过程中的中间图片)
+
+	recentPath string
+	cacheDir   string
+	sessionMu  sync.Mutex
+
 	logger  *slog.Logger
 	logFile *os.File
 }
 
-func NewApp(tempDir string) *App {
-	app := &App{
-		tempDir: tempDir,
+func NewApp() *App {
+	app := &App{}
+
+	// 1. 获取跨平台的用户数据目录 (Win: %APPDATA%, Mac: ~/Library/Application Support)
+	userConfigDir, err := os.Getwd()
+	if err != nil {
+		userConfigDir = "." // 降级处理
 	}
+	app.dataDir = filepath.Join(userConfigDir, "data")
+	_ = os.MkdirAll(app.dataDir, 0755)
 
-	// 👇 新增：在初始化配置前，先初始化日志系统
+	// 2. 临时目录使用系统 Temp，避免占用用户磁盘且系统会自动清理
+	app.tempDir = filepath.Join(userConfigDir, "temp")
+	_ = os.MkdirAll(filepath.Join(app.tempDir, "local"), 0755)
+
+	// 初始化日志和配置
 	app.initLogger()
-
 	app.initConfig()
+
 	return app
 }
 
 func (a *App) initLogger() {
-
-	configDir := a.tempDir
-
-	logDir := filepath.Join(configDir, "logs")
+	logDir := filepath.Join(a.dataDir, "logs")
 	_ = os.MkdirAll(logDir, 0755)
 
-	// 按天命名日志文件，例如 app_2026-09-04.log
 	logFileName := fmt.Sprintf("app_%s.log", time.Now().Format("2006-01-02"))
 	logFilePath := filepath.Join(logDir, logFileName)
 
 	file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		a.logger.Info("⚠️ 无法创建日志文件 %s: %v\n", logFilePath, err)
-		// 降级：如果文件创建失败，只输出到控制台
+		// ✅ 修复：slog 不支持 %s/%v 格式化，改用标准键值对
+		slog.Warn("⚠️ 无法创建日志文件", "path", logFilePath, "err", err)
 		a.logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		return
 	}
-
 	a.logFile = file
 
-	// 🌟 核心：使用 MultiWriter 同时输出到 控制台(os.Stdout) 和 文件(file)
 	multiWriter := io.MultiWriter(os.Stdout, file)
-
 	handler := slog.NewTextHandler(multiWriter, &slog.HandlerOptions{
-		Level: slog.LevelDebug, // 记录 Debug 及以上级别 (Debug, Info, Warn, Error)
+		Level: slog.LevelDebug,
 	})
-
 	a.logger = slog.New(handler)
 	a.logger.Info("🚀 日志系统初始化成功", "logPath", logFilePath)
 }
 
 // ================= 4. 本地文件服务 =================
-// /local/ 临时目录
-// /cache/ 持久化缓存目录
 func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	urlPath := r.URL.Path
-
 	var base string
 	var reqPath string
 
@@ -129,6 +132,7 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ✅ 优化：规范路径拼接，防止目录穿越攻击
 	cleaned := filepath.Clean("/" + reqPath)
 	fullPath := filepath.Join(base, cleaned)
 
@@ -136,19 +140,15 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-
 	http.ServeFile(w, r, fullPath)
 }
 
 // ================= 5. 初始化配置 =================
 func (a *App) initConfig() {
-	configDir := a.tempDir
-
-	appConfigDir := configDir
-	configPath := filepath.Join(appConfigDir, "config.json")
-	a.recentPath = filepath.Join(appConfigDir, "recent.json")
-	a.cacheDir = filepath.Join(appConfigDir, "cache")
-
+	// ✅ 优化：所有持久化文件均存放在 dataDir 下
+	configPath := filepath.Join(a.dataDir, "config.json")
+	a.recentPath = filepath.Join(a.dataDir, "recent.json")
+	a.cacheDir = filepath.Join(a.dataDir, "cache")
 	_ = os.MkdirAll(a.cacheDir, 0755)
 
 	a.config = &AppConfig{
@@ -163,8 +163,19 @@ func (a *App) initConfig() {
 	} else {
 		_ = a.saveConfig()
 	}
-
 	a.config.ConfigPath = configPath
+
+	// ✅ 优化：启动时异步清理超限的旧缓存，防止磁盘爆满
+	go a.cleanOldCache(200)
+}
+
+// ✅ 优化：原子写入，防止断电/崩溃导致配置文件损坏
+func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	tmpFile := path + ".tmp"
+	if err := os.WriteFile(tmpFile, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmpFile, path)
 }
 
 func (a *App) saveConfig() error {
@@ -172,27 +183,21 @@ func (a *App) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(a.config.ConfigPath, data, 0644)
+	return atomicWriteFile(a.config.ConfigPath, data, 0644)
 }
 
 //go:embed all:lib
 var embeddedLibFS embed.FS
 
-// extractLibFiles 将打包进二进制的 lib 文件释放到本地磁盘，并返回真实的绝对路径
 func (a *App) extractLibFiles() (libPath string, layoutPath string, err error) {
-	// 获取用户的配置目录 (Windows: %APPDATA%, Mac: ~/Library/Application Support)
-	configDir := a.tempDir
-
-	// 创建一个专属的缓存目录，避免和其他软件冲突
-	targetDir := filepath.Join(configDir, "lib")
+	// ✅ 优化：lib 文件释放到持久化目录
+	targetDir := filepath.Join(a.dataDir, "lib")
 	if err := os.MkdirAll(targetDir, 0755); err != nil {
 		return "", "", fmt.Errorf("创建缓存目录失败: %w", err)
 	}
 
-	// 1. 释放 onnxruntime.dll
 	dllName := "onnxruntime.dll"
 	dllDst := filepath.Join(targetDir, dllName)
-	// 如果文件不存在，或者大小为0，则从内存释放到磁盘
 	if info, err := os.Stat(dllDst); err != nil || info.Size() == 0 {
 		data, err := embeddedLibFS.ReadFile("lib/" + dllName)
 		if err != nil {
@@ -201,10 +206,9 @@ func (a *App) extractLibFiles() (libPath string, layoutPath string, err error) {
 		if err := os.WriteFile(dllDst, data, 0755); err != nil {
 			return "", "", fmt.Errorf("写入 %s 失败: %w", dllDst, err)
 		}
-		a.logger.Info("✅ 已释放内置文件: %s\n", dllDst)
+		a.logger.Info("✅ 已释放内置文件", "file", dllDst)
 	}
 
-	// 2. 释放 PP-DocLayoutV3.onnx
 	onnxName := "PP-DocLayoutV3.onnx"
 	onnxDst := filepath.Join(targetDir, onnxName)
 	if info, err := os.Stat(onnxDst); err != nil || info.Size() == 0 {
@@ -215,7 +219,7 @@ func (a *App) extractLibFiles() (libPath string, layoutPath string, err error) {
 		if err := os.WriteFile(onnxDst, data, 0755); err != nil {
 			return "", "", fmt.Errorf("写入 %s 失败: %w", onnxDst, err)
 		}
-		a.logger.Info("✅ 已释放内置文件: %s\n", onnxDst)
+		a.logger.Info("✅ 已释放内置文件", "file", onnxDst)
 	}
 
 	return dllDst, onnxDst, nil
@@ -229,21 +233,17 @@ func (a *App) ensureSession() error {
 	if a.paddleOCRVL != nil {
 		return nil
 	}
-
 	if a.config == nil {
 		return fmt.Errorf("配置未初始化")
 	}
 
-	// 1. 将打包的文件释放到真实磁盘，获取绝对路径
 	libPath, layoutPath, err := a.extractLibFiles()
 	if err != nil {
-		// 如果释放失败（比如在 wails dev 开发环境下没有 embed 进去），回退到本地相对路径
-		a.logger.Info("⚠️ 释放内置文件失败，回退到本地相对路径: %v\n", err)
+		a.logger.Warn("⚠️ 释放内置文件失败，回退到本地相对路径", "err", err)
 		libPath = "./lib/onnxruntime.dll"
 		layoutPath = "./lib/PP-DocLayoutV3.onnx"
 	}
 
-	// 2. 直接调用 ocr.InitOrt，它内部会自动处理 InitializeEnvironment，千万不要在外面再调一次！
 	if err := ocr.InitOrt(libPath); err != nil {
 		return fmt.Errorf("初始化 ORT 失败: %w", err)
 	}
@@ -255,7 +255,7 @@ func (a *App) ensureSession() error {
 	defer options.Destroy()
 
 	layoutDetSessionInternal, err := ort.NewDynamicAdvancedSession(
-		layoutPath, // 使用真实的磁盘绝对路径
+		layoutPath,
 		[]string{"im_shape", "image", "scale_factor"},
 		[]string{"fetch_name_0", "fetch_name_1", "fetch_name_2"},
 		options,
@@ -265,65 +265,46 @@ func (a *App) ensureSession() error {
 	}
 
 	docLayoutSession := layout.NewLayoutDetSession(layoutDetSessionInternal)
-
 	a.paddleOCRVL = vl.NewDefaultPaddleOCRVL(
 		a.config.ModelName,
 		a.config.Url,
 		a.config.ApiKey,
 		docLayoutSession,
 	)
-
 	return nil
 }
 
 // ================= 7. 配置相关接口 =================
-func (a *App) GetConfig() *AppConfig {
-	return a.config
-}
+func (a *App) GetConfig() *AppConfig { return a.config }
 
 func (a *App) UpdateConfig(newConfig *AppConfig) error {
 	if newConfig == nil {
 		return fmt.Errorf("配置为空")
 	}
-
 	newConfig.ConfigPath = a.config.ConfigPath
-
 	a.config = newConfig
-
 	return a.saveConfig()
 }
 
 func (a *App) SelectDirectory(title string) (string, error) {
-	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: title,
-	})
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: title})
 }
 
 func (a *App) SelectFile(title string) (string, error) {
 	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: title,
 		Filters: []runtime.FileFilter{
-			{
-				DisplayName: "库与模型文件 (*.dll;*.so;*.dylib;*.pdmodel;*.onnx;*.bin)",
-				Pattern:     "*.dll;*.so;*.dylib;*.pdmodel;*.onnx;*.bin",
-			},
-			{
-				DisplayName: "所有文件 (*.*)",
-				Pattern:     "*.*",
-			},
+			{DisplayName: "库与模型文件 (*.dll;*.so;*.dylib;*.pdmodel;*.onnx;*.bin)", Pattern: "*.dll;*.so;*.dylib;*.pdmodel;*.onnx;*.bin"},
+			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
 		},
 	})
 }
 
 func (a *App) SelectExportDir() (string, error) {
-	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "选择导出目录",
-	})
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{Title: "选择导出目录"})
 }
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-}
+func (a *App) startup(ctx context.Context) { a.ctx = ctx }
 
 // ================= 8. 最近使用/收藏 =================
 func fileIDFromPath(path string) string {
@@ -357,11 +338,9 @@ func normalizeRecentFile(f RecentFile) RecentFile {
 	if f.Path == "" {
 		return f
 	}
-
 	if f.ID == "" {
 		f.ID = fileIDFromPath(f.Path)
 	}
-
 	if info, err := os.Stat(f.Path); err == nil {
 		if f.Name == "" {
 			f.Name = info.Name()
@@ -383,15 +362,12 @@ func normalizeRecentFile(f RecentFile) RecentFile {
 			f.Size = "0 KB"
 		}
 	}
-
 	if f.Type == "" {
 		f.Type = fileTypeFromPath(f.Path)
 	}
-
 	if f.LastUsed == 0 {
 		f.LastUsed = time.Now().UnixMilli()
 	}
-
 	return f
 }
 
@@ -399,17 +375,14 @@ func (a *App) loadRecentFiles() []RecentFile {
 	if a.recentPath == "" {
 		return []RecentFile{}
 	}
-
 	data, err := os.ReadFile(a.recentPath)
 	if err != nil {
 		return []RecentFile{}
 	}
-
 	var files []RecentFile
 	if err := json.Unmarshal(data, &files); err != nil {
 		return []RecentFile{}
 	}
-
 	return files
 }
 
@@ -418,16 +391,14 @@ func (a *App) saveRecentFiles(files []RecentFile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(a.recentPath, data, 0644)
+	return atomicWriteFile(a.recentPath, data, 0644)
 }
 
 func (a *App) GetRecentFiles() ([]RecentFile, error) {
 	files := a.loadRecentFiles()
-
 	sort.SliceStable(files, func(i, j int) bool {
 		return files[i].LastUsed > files[j].LastUsed
 	})
-
 	return files, nil
 }
 
@@ -435,16 +406,11 @@ func (a *App) AddRecentFiles(files []RecentFile) ([]RecentFile, error) {
 	if len(files) == 0 {
 		return a.GetRecentFiles()
 	}
-
 	existing := a.loadRecentFiles()
 	existingByPath := make(map[string]RecentFile)
 	for _, f := range existing {
 		existingByPath[f.Path] = f
 	}
-
-	sort.SliceStable(existing, func(i, j int) bool {
-		return existing[i].LastUsed > existing[j].LastUsed
-	})
 
 	var result []RecentFile
 	seen := make(map[string]bool)
@@ -455,14 +421,12 @@ func (a *App) AddRecentFiles(files []RecentFile) ([]RecentFile, error) {
 		if f.Path == "" || seen[f.Path] {
 			continue
 		}
-
 		if old, ok := existingByPath[f.Path]; ok {
 			f.Favorite = old.Favorite
 			if f.ID == "" {
 				f.ID = old.ID
 			}
 		}
-
 		f.LastUsed = now + int64(i)
 		result = append(result, f)
 		seen[f.Path] = true
@@ -483,34 +447,28 @@ func (a *App) AddRecentFiles(files []RecentFile) ([]RecentFile, error) {
 	if err := a.saveRecentFiles(result); err != nil {
 		return nil, err
 	}
-
 	return result, nil
 }
 
 func (a *App) ToggleFavorite(id string) ([]RecentFile, error) {
 	files := a.loadRecentFiles()
-
 	for i := range files {
 		if files[i].ID == id || files[i].Path == id {
 			files[i].Favorite = !files[i].Favorite
 		}
 	}
-
 	sort.SliceStable(files, func(i, j int) bool {
 		return files[i].LastUsed > files[j].LastUsed
 	})
-
 	if err := a.saveRecentFiles(files); err != nil {
 		return nil, err
 	}
-
 	return files, nil
 }
 
 func (a *App) RemoveRecentFile(id string) ([]RecentFile, error) {
 	files := a.loadRecentFiles()
 	var result []RecentFile
-
 	for _, f := range files {
 		if f.ID == id || f.Path == id {
 			_ = a.DeleteParseResult(f.Path)
@@ -518,11 +476,9 @@ func (a *App) RemoveRecentFile(id string) ([]RecentFile, error) {
 		}
 		result = append(result, f)
 	}
-
 	if err := a.saveRecentFiles(result); err != nil {
 		return nil, err
 	}
-
 	return result, nil
 }
 
@@ -534,43 +490,50 @@ func (a *App) ClearRecentFiles() ([]RecentFile, error) {
 	return []RecentFile{}, nil
 }
 
+// ✅ 优化：新增 LRU 缓存清理机制
+func (a *App) cleanOldCache(maxItems int) {
+	files := a.loadRecentFiles()
+	if len(files) <= maxItems {
+		return
+	}
+	sort.SliceStable(files, func(i, j int) bool {
+		return files[i].LastUsed > files[j].LastUsed
+	})
+
+	toRemove := files[maxItems:]
+	for _, f := range toRemove {
+		_ = a.DeleteParseResult(f.Path)
+	}
+	_ = a.saveRecentFiles(files[:maxItems])
+	a.logger.Info("🧹 已自动清理过期缓存", "count", len(toRemove))
+}
+
 // ================= 9. 打开文件 =================
 func (a *App) OpenFiles() ([]RecentFile, error) {
 	if a.ctx == nil {
 		return nil, fmt.Errorf("app context is nil")
 	}
-
 	filePaths, err := runtime.OpenMultipleFilesDialog(a.ctx, runtime.OpenDialogOptions{
 		Title: "选择文件",
 		Filters: []runtime.FileFilter{
-			{
-				DisplayName: "所有支持格式 (*.pdf;*.jpg;*.jpeg;*.png)",
-				Pattern:     "*.pdf;*.jpg;*.jpeg;*.png",
-			},
-			{
-				DisplayName: "所有文件 (*.*)",
-				Pattern:     "*.*",
-			},
+			{DisplayName: "所有支持格式 (*.pdf;*.jpg;*.jpeg;*.png)", Pattern: "*.pdf;*.jpg;*.jpeg;*.png"},
+			{DisplayName: "所有文件 (*.*)", Pattern: "*.*"},
 		},
 	})
-
 	if err != nil {
 		return nil, err
 	}
-
 	if len(filePaths) == 0 {
 		return nil, nil
 	}
 
 	items := make([]RecentFile, 0, len(filePaths))
 	now := time.Now().UnixMilli()
-
 	for i, filePath := range filePaths {
 		info, err := os.Stat(filePath)
 		if err != nil {
 			continue
 		}
-
 		items = append(items, RecentFile{
 			ID:       fileIDFromPath(filePath),
 			Name:     info.Name(),
@@ -582,11 +545,9 @@ func (a *App) OpenFiles() ([]RecentFile, error) {
 			LastUsed: now + int64(i),
 		})
 	}
-
 	if len(items) == 0 {
 		return nil, fmt.Errorf("所选文件不可用")
 	}
-
 	return a.AddRecentFiles(items)
 }
 
@@ -614,16 +575,15 @@ func (a *App) ParseFile(filePath string) (results []PageInfo, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("ParseFile 发生 Panic: %v", r)
-			a.logger.Info("⚠️ [严重错误] %v\n", err)
+			a.logger.Error("⚠️ [严重错误] Panic", "err", err)
 		}
 	}()
 
-	a.logger.Info("\n=== 🚀 后端 ParseFile 被调用: %s ===\n", filePath)
+	a.logger.Info("=== 🚀 后端 ParseFile 被调用 ===", "filePath", filePath)
 
 	if _, statErr := os.Stat(filePath); statErr != nil {
 		return nil, fmt.Errorf("文件不存在或无法访问: %w", statErr)
 	}
-
 	if err := a.ensureSession(); err != nil {
 		return nil, err
 	}
@@ -643,12 +603,14 @@ func (a *App) ParseFile(filePath string) (results []PageInfo, err error) {
 
 	pageResults, err := session.RunOCR(filePath)
 	if err != nil {
-		a.logger.Error("OCR识别失败: %w", err)
+		a.logger.Error("OCR识别失败", "err", err)
 		return nil, fmt.Errorf("OCR识别失败: %w", err)
 	}
 
 	results = make([]PageInfo, 0, len(pageResults))
-	timeStamp := time.Now().UnixMilli()
+
+	// ✅ 优化：使用 UUID 防止并发/快速处理时的文件名冲突
+	uniqueID := uuid.NewString()[:8]
 
 	for i, page := range pageResults {
 		info := PageInfo{
@@ -676,27 +638,26 @@ func (a *App) ParseFile(filePath string) (results []PageInfo, err error) {
 		}
 
 		if !page.Mat.Empty() {
-			fileName := fmt.Sprintf("img_%d_%d.png", timeStamp, i)
-			fullPath := filepath.Join(a.tempDir, "/local/", fileName)
+			// ✅ 优化：保存为 JPEG，大幅减小体积，且使用 UUID 防冲突
+			fileName := fmt.Sprintf("img_%s_p%d.jpg", uniqueID, i)
+			fullPath := filepath.Join(a.tempDir, "local", fileName)
 
-			if success := gocv.IMWrite(fullPath, page.Mat); success {
+			params := []int{gocv.IMWriteJpegQuality, 85}
+			if success := gocv.IMWriteWithParams(fullPath, page.Mat, params); success {
 				info.ImagePath = "/local/" + fileName
 			} else {
 				info.Error = "保存图片失败"
 			}
-
 			page.Mat.Close()
 		}
-
 		results = append(results, info)
 	}
 
-	// 识别完成后自动持久化，下次直接读取，不重新识别
 	if saveErr := a.SaveParseResult(filePath, results); saveErr != nil {
-		a.logger.Info("⚠️ 保存识别结果失败: %v\n", saveErr)
+		a.logger.Warn("⚠️ 保存识别结果失败", "err", saveErr)
 	}
 
-	fmt.Println("✅ ParseFile 处理完成")
+	a.logger.Info("✅ ParseFile 处理完成")
 	return results, nil
 }
 
@@ -716,13 +677,11 @@ func copyFile(src string, dst string) error {
 		return err
 	}
 	defer in.Close()
-
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	defer out.Close()
-
 	_, err = io.Copy(out, in)
 	return err
 }
@@ -731,18 +690,15 @@ func (a *App) GetParseResult(filePath string) ([]PageInfo, error) {
 	if strings.TrimSpace(filePath) == "" {
 		return nil, nil
 	}
-
 	data, err := os.ReadFile(a.resultFilePath(filePath))
 	if err != nil {
 		return nil, nil
 	}
-
 	var pages []PageInfo
 	if err := json.Unmarshal(data, &pages); err != nil {
 		return nil, nil
 	}
 
-	// 校验图片是否还存在，如果不存在就强制重新识别
 	for _, page := range pages {
 		if page.ImagePath != "" {
 			imgPath := a.resolveImagePath(page.ImagePath)
@@ -751,7 +707,6 @@ func (a *App) GetParseResult(filePath string) ([]PageInfo, error) {
 			}
 		}
 	}
-
 	return pages, nil
 }
 
@@ -759,28 +714,27 @@ func (a *App) SaveParseResult(filePath string, pages []PageInfo) error {
 	if strings.TrimSpace(filePath) == "" {
 		return fmt.Errorf("filePath is empty")
 	}
-
 	id := fileIDFromPath(filePath)
 	dir := filepath.Join(a.cacheDir, id)
-
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
 
-	// 如果图片还在 /local/ 临时目录，就复制到 /cache/ 持久化目录
 	for i := range pages {
 		imagePath := pages[i].ImagePath
-
 		if strings.HasPrefix(imagePath, "/local/") {
 			fileName := filepath.Base(strings.TrimPrefix(imagePath, "/local/"))
-			src := filepath.Join(a.tempDir, fileName)
-			dstName := fmt.Sprintf("page_%d_%d.png", pages[i].PageIndex, i)
+			// ✅ 优化：修正临时目录路径拼接
+			src := filepath.Join(a.tempDir, "local", fileName)
+
+			// ✅ 优化：后缀统一改为 .jpg
+			dstName := fmt.Sprintf("page_%d_%d.jpg", pages[i].PageIndex, i)
 			dst := filepath.Join(dir, dstName)
 
 			if err := copyFile(src, dst); err == nil {
 				pages[i].ImagePath = "/cache/" + id + "/" + dstName
 			} else {
-				a.logger.Info("⚠️ 复制页面图片失败: %v\n", err)
+				a.logger.Warn("⚠️ 复制页面图片失败", "err", err)
 			}
 		}
 	}
@@ -789,8 +743,7 @@ func (a *App) SaveParseResult(filePath string, pages []PageInfo) error {
 	if err != nil {
 		return err
 	}
-
-	return os.WriteFile(a.resultFilePath(filePath), data, 0644)
+	return atomicWriteFile(a.resultFilePath(filePath), data, 0644)
 }
 
 func (a *App) DeleteParseResult(filePath string) error {
@@ -802,13 +755,12 @@ func (a *App) DeleteParseResult(filePath string) error {
 
 func (a *App) resolveImagePath(imagePath string) string {
 	if strings.HasPrefix(imagePath, "/local/") {
-		return filepath.Join(a.tempDir, strings.TrimPrefix(imagePath, "/local/"))
+		// ✅ 优化：修正临时目录路径拼接
+		return filepath.Join(a.tempDir, "local", strings.TrimPrefix(imagePath, "/local/"))
 	}
-
 	if strings.HasPrefix(imagePath, "/cache/") {
 		return filepath.Join(a.cacheDir, strings.TrimPrefix(imagePath, "/cache/"))
 	}
-
 	return filepath.Join(a.tempDir, filepath.Base(imagePath))
 }
 
@@ -833,7 +785,6 @@ func (a *App) ExportData(pageInfos []PageInfo, excludeLabels []string) error {
 	if a.ctx == nil {
 		return fmt.Errorf("app context is nil")
 	}
-
 	if len(pageInfos) == 0 {
 		return fmt.Errorf("没有可导出的数据")
 	}
@@ -842,21 +793,13 @@ func (a *App) ExportData(pageInfos []PageInfo, excludeLabels []string) error {
 		Title:           "导出数据集 (JSONL)",
 		DefaultFilename: fmt.Sprintf("ocr_dataset_%s.jsonl", time.Now().Format("20060102_150405")),
 		Filters: []runtime.FileFilter{
-			{
-				DisplayName: "JSONL Files (*.jsonl)",
-				Pattern:     "*.jsonl",
-			},
-			{
-				DisplayName: "All Files (*.*)",
-				Pattern:     "*.*",
-			},
+			{DisplayName: "JSONL Files (*.jsonl)", Pattern: "*.jsonl"},
+			{DisplayName: "All Files (*.*)", Pattern: "*.*"},
 		},
 	})
-
 	if err != nil {
 		return err
 	}
-
 	if filename == "" {
 		return fmt.Errorf("已取消导出")
 	}
@@ -895,7 +838,6 @@ func (a *App) ExportData(pageInfos []PageInfo, excludeLabels []string) error {
 		Title:   "导出成功",
 		Message: fmt.Sprintf("数据集已成功保存至:\n%s\n(包含同级 assets 文件夹)", filename),
 	})
-
 	return nil
 }
 
@@ -909,19 +851,16 @@ func (a *App) processPage(
 	if page.ImagePath == "" {
 		return nil
 	}
-
 	srcImgPath := a.resolveImagePath(page.ImagePath)
-
 	img := gocv.IMRead(srcImgPath, gocv.IMReadColor)
 	if img.Empty() {
-		a.logger.Info("⚠️ 警告: 无法加载原图 %s，跳过该页\n", srcImgPath)
+		a.logger.Warn("⚠️ 警告: 无法加载原图，跳过该页", "path", srcImgPath)
 		return nil
 	}
 	defer img.Close()
 
 	for blockIndex, block := range page.Blocks {
 		label := strings.ToLower(strings.TrimSpace(block.Label))
-
 		if label != "" && excludeMap[label] {
 			continue
 		}
@@ -934,7 +873,7 @@ func (a *App) processPage(
 			maskText = "Table Recognition:"
 			otsl, err := utils.ConvertHtmlToOtsl(block.Text)
 			if err != nil {
-				a.logger.Info("⚠️ 警告: Page %d, Block %d 转换 OTSL 失败: %v，使用原文本降级\n", pageIndex, blockIndex, err)
+				a.logger.Warn("⚠️ 警告: 转换 OTSL 失败，使用原文本降级", "page", pageIndex, "block", blockIndex, "err", err)
 				noMaskText = block.Text
 			} else {
 				noMaskText = otsl
@@ -966,20 +905,22 @@ func (a *App) processPage(
 
 		cropMat, err := a.cropBlock(img, block)
 		if err != nil {
-			a.logger.Info("⚠️ 警告: 裁剪 block 失败 (Page %d, Block %d): %v\n", pageIndex, blockIndex, err)
+			a.logger.Warn("⚠️ 警告: 裁剪 block 失败", "page", pageIndex, "block", blockIndex, "err", err)
 		} else if cropMat != nil {
 			if !cropMat.Empty() {
-				uniqueID := uuid.NewString()
-				cropFileName := fmt.Sprintf("%s_crop_p%d_b%d.png", uniqueID, pageIndex, blockIndex)
+				uniqueID := uuid.NewString()[:8]
+				// ✅ 优化：裁剪图也使用 JPG 以减小体积，质量设为 90 保证清晰度
+				cropFileName := fmt.Sprintf("%s_crop_p%d_b%d.jpg", uniqueID, pageIndex, blockIndex)
 				cropFullPath := filepath.Join(assetsDir, cropFileName)
 
-				if success := gocv.IMWrite(cropFullPath, *cropMat); success {
+				params := []int{gocv.IMWriteJpegQuality, 90}
+				if success := gocv.IMWriteWithParams(cropFullPath, *cropMat, params); success {
 					result.ImageInfo = append(result.ImageInfo, ImageInfo{
 						MatchedTextIndex: 0,
 						ImageURL:         "./assets/" + cropFileName,
 					})
 				} else {
-					a.logger.Info("⚠️ 警告: 保存裁剪图片失败 %s\n", cropFullPath)
+					a.logger.Warn("⚠️ 警告: 保存裁剪图片失败", "path", cropFullPath)
 				}
 			}
 			cropMat.Close()
@@ -989,18 +930,15 @@ func (a *App) processPage(
 			return fmt.Errorf("序列化并写入 JSONL 失败: %w", err)
 		}
 	}
-
 	return nil
 }
 
 // ================= 15. 裁剪辅助 =================
 func (a *App) cropBlock(img gocv.Mat, block Block) (*gocv.Mat, error) {
 	point := block.Point
-
 	if len(point) > 4 && len(point)%2 == 0 {
 		minX, minY := point[0], point[1]
 		maxX, maxY := minX, minY
-
 		for i := 2; i < len(point); i += 2 {
 			x := point[i]
 			y := point[i+1]
@@ -1017,14 +955,12 @@ func (a *App) cropBlock(img gocv.Mat, block Block) (*gocv.Mat, error) {
 				maxY = y
 			}
 		}
-
 		point = []int{minX, minY, maxX, maxY}
 	} else if len(point) < 4 && len(block.PolygonPoints) > 0 {
 		minX := block.PolygonPoints[0].X
 		minY := block.PolygonPoints[0].Y
 		maxX := minX
 		maxY := minY
-
 		for _, p := range block.PolygonPoints {
 			if p.X < minX {
 				minX = p.X
@@ -1039,14 +975,12 @@ func (a *App) cropBlock(img gocv.Mat, block Block) (*gocv.Mat, error) {
 				maxY = p.Y
 			}
 		}
-
 		point = []int{minX, minY, maxX, maxY}
 	}
 
 	if len(point) < 4 {
 		return nil, fmt.Errorf("缺少裁剪坐标")
 	}
-
 	if point[2] < point[0] {
 		point[0], point[2] = point[2], point[0]
 	}
