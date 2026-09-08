@@ -58,7 +58,6 @@ type App struct {
 
 	// ✅ 优化：分离持久化目录和临时目录
 	dataDir string // 持久化数据目录 (配置、缓存、lib、日志)
-	tempDir string // 临时文件目录 (OCR 过程中的中间图片)
 
 	recentPath string
 	cacheDir   string
@@ -79,9 +78,7 @@ func NewApp() *App {
 	app.dataDir = filepath.Join(userConfigDir, "data")
 	_ = os.MkdirAll(app.dataDir, 0755)
 
-	// 2. 临时目录使用系统 Temp，避免占用用户磁盘且系统会自动清理
-	app.tempDir = filepath.Join(userConfigDir, "temp")
-	_ = os.MkdirAll(filepath.Join(app.tempDir, "local"), 0755)
+	_ = os.MkdirAll(filepath.Join(app.dataDir, "images"), 0755)
 
 	// 初始化日志和配置
 	app.initLogger()
@@ -121,9 +118,9 @@ func (a *App) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var reqPath string
 
 	switch {
-	case strings.HasPrefix(urlPath, "/local/"):
-		base = a.tempDir
-		reqPath = strings.TrimPrefix(urlPath, "/local/")
+	case strings.HasPrefix(urlPath, "/images/"):
+		base = a.dataDir
+		reqPath = strings.TrimPrefix(urlPath, "/images/")
 	case strings.HasPrefix(urlPath, "/cache/"):
 		base = a.cacheDir
 		reqPath = strings.TrimPrefix(urlPath, "/cache/")
@@ -155,7 +152,7 @@ func (a *App) initConfig() {
 		ConfigPath: configPath,
 		ModelName:  "AuditAid/PaddleOCR-VL-1.6-0.9B",
 		Url:        "http://localhost:11434/v1/chat/completions",
-		ApiKey:     "sk-ufajxhcyibsxcatybmjqhaierwwbbxjdrhwitcmrscyodhsq",
+		ApiKey:     "",
 	}
 
 	if data, err := os.ReadFile(configPath); err == nil {
@@ -610,7 +607,7 @@ func (a *App) ParseFile(filePath string) (results []PageInfo, err error) {
 	results = make([]PageInfo, 0, len(pageResults))
 
 	// ✅ 优化：使用 UUID 防止并发/快速处理时的文件名冲突
-	uniqueID := uuid.NewString()[:8]
+	uniqueID := uuid.NewString()
 
 	for i, page := range pageResults {
 		info := PageInfo{
@@ -640,11 +637,11 @@ func (a *App) ParseFile(filePath string) (results []PageInfo, err error) {
 		if !page.Mat.Empty() {
 			// ✅ 优化：保存为 JPEG，大幅减小体积，且使用 UUID 防冲突
 			fileName := fmt.Sprintf("img_%s_p%d.jpg", uniqueID, i)
-			fullPath := filepath.Join(a.tempDir, "local", fileName)
+			fullPath := filepath.Join(a.dataDir, "images", fileName)
 
 			params := []int{gocv.IMWriteJpegQuality, 85}
 			if success := gocv.IMWriteWithParams(fullPath, page.Mat, params); success {
-				info.ImagePath = "/local/" + fileName
+				info.ImagePath = "/images/" + fileName
 			} else {
 				info.Error = "保存图片失败"
 			}
@@ -722,10 +719,10 @@ func (a *App) SaveParseResult(filePath string, pages []PageInfo) error {
 
 	for i := range pages {
 		imagePath := pages[i].ImagePath
-		if strings.HasPrefix(imagePath, "/local/") {
-			fileName := filepath.Base(strings.TrimPrefix(imagePath, "/local/"))
+		if strings.HasPrefix(imagePath, "/images/") {
+			fileName := filepath.Base(strings.TrimPrefix(imagePath, "/images/"))
 			// ✅ 优化：修正临时目录路径拼接
-			src := filepath.Join(a.tempDir, "local", fileName)
+			src := filepath.Join(a.dataDir, "images", fileName)
 
 			// ✅ 优化：后缀统一改为 .jpg
 			dstName := fmt.Sprintf("page_%d_%d.jpg", pages[i].PageIndex, i)
@@ -754,14 +751,14 @@ func (a *App) DeleteParseResult(filePath string) error {
 }
 
 func (a *App) resolveImagePath(imagePath string) string {
-	if strings.HasPrefix(imagePath, "/local/") {
+	if strings.HasPrefix(imagePath, "/images/") {
 		// ✅ 优化：修正临时目录路径拼接
-		return filepath.Join(a.tempDir, "local", strings.TrimPrefix(imagePath, "/local/"))
+		return filepath.Join(a.dataDir, "images", strings.TrimPrefix(imagePath, "/images/"))
 	}
 	if strings.HasPrefix(imagePath, "/cache/") {
 		return filepath.Join(a.cacheDir, strings.TrimPrefix(imagePath, "/cache/"))
 	}
-	return filepath.Join(a.tempDir, filepath.Base(imagePath))
+	return filepath.Join(a.dataDir, filepath.Base(imagePath))
 }
 
 // ================= 13. 导出数据集结构 =================
