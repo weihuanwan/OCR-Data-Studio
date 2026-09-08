@@ -6,7 +6,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/wailsapp/wails/v2 v2.15.0
 	github.com/weihuanwan/paddleocr-go v0.0.0-20260821062906-2991f48c8b27
-	github.com/yalue/onnxruntime_go v1.36.0
+	github.com/yalue/onnxruntime_go v1.27.0
 	gocv.io/x/gocv v0.43.0
 )
 
