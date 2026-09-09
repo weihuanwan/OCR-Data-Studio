@@ -33,6 +33,12 @@ func main() {
 			if app.logFile != nil {
 				app.logFile.Close()
 			}
+			if app.paddleOCRVL != nil &&
+				app.paddleOCRVL.LayoutDetSession != nil &&
+				app.paddleOCRVL.LayoutDetSession.OnnxSession != nil {
+				app.paddleOCRVL.LayoutDetSession.OnnxSession.Destroy()
+			}
+
 		},
 		Bind: []interface{}{
 			app,
