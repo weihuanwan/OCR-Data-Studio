@@ -138,7 +138,7 @@
                           <button
                               class="tb-btn danger"
                               type="button"
-                              :disabled="!canDeleteSelectedRow"
+                              :disabled="canDeleteSelectedRow"
                               @click.stop="deleteSelectedTableRow"
                           >
                             − 删除行
@@ -147,7 +147,7 @@
                           <button
                               class="tb-btn danger"
                               type="button"
-                              :disabled="!canDeleteSelectedColumn"
+                              :disabled="canDeleteSelectedColumn"
                               @click.stop="deleteSelectedTableColumn"
                           >
                             − 删除列
@@ -365,6 +365,7 @@ export default {
 
     canDeleteSelectedRow() {
       const table = this.getEditorTable()
+      debugger
       if (!table || table.rows.length <= 1) return false
       return this.editActiveCell.rowIndex >= 0
     },
