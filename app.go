@@ -862,8 +862,8 @@ func (a *App) processPage(
 		var result RecognitionResult
 		var maskText, noMaskText string
 
-		switch label {
-		case "table":
+		switch {
+		case label == "table":
 			maskText = "Table Recognition:"
 			otsl, err := utils.ConvertHtmlToOtsl(block.Text)
 			if err != nil {
@@ -872,18 +872,23 @@ func (a *App) processPage(
 			} else {
 				noMaskText = otsl
 			}
-		case "formula":
+
+		case strings.Contains(label, "formula"): // 修改为包含匹配
 			maskText = "Formula Recognition:"
 			noMaskText = block.Text
-		case "chart":
+
+		case label == "chart":
 			maskText = "Chart Recognition:"
 			noMaskText = block.Text
-		case "seal":
+
+		case label == "seal":
 			maskText = "Seal Recognition:"
 			noMaskText = block.Text
-		case "spotting":
+
+		case label == "spotting":
 			maskText = "Spotting:"
 			noMaskText = block.Text
+
 		default:
 			if excludeMap["text"] || excludeMap["ocr"] {
 				continue
