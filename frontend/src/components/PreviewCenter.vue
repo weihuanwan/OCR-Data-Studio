@@ -344,7 +344,7 @@ export default {
       excludeLabels: [],
       labelOptions: [
         { label: '表格 (Table)', value: 'table' },
-        { label: '公式 (Formula)', value: 'formula' },
+        { label: '公式 (Formula)', value: 'formula_number' },
         { label: '图表 (Chart)', value: 'chart' },
         { label: '印章 (Seal)', value: 'seal' },
         { label: '定位 (Spotting)', value: 'spotting' },
