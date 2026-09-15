@@ -226,7 +226,7 @@
                 </template>
 
                 <div class="block-meta" v-if="block.score !== undefined">
-                  置信度 {{ (block.score * 100).toFixed(1) }}%
+                  {{block.label }}  置信度 {{ (block.score * 100).toFixed(1) }}%
                 </div>
               </div>
             </div>
