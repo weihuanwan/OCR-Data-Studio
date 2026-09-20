@@ -1,12 +1,12 @@
 module OCR-Data-Studio
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/wailsapp/wails/v2 v2.15.0
-	github.com/weihuanwan/paddleocr-go v0.0.0-20260821062906-2991f48c8b27
-	github.com/yalue/onnxruntime_go v1.27.0
+	github.com/wailsapp/wails/v2 v2.16.0
+	github.com/weihuanwan/paddleocr-go v0.0.0-20260920073130-150448fc1c62
+	github.com/yalue/onnxruntime_go v1.36.0
 	gocv.io/x/gocv v0.43.0
 )
 
@@ -38,11 +38,11 @@ require (
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.23 // indirect
 	github.com/wailsapp/mimetype v1.4.1 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect
-	golang.org/x/net v0.58.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/exp v0.0.0-20260908205506-85c1c2202aba // indirect
+	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )
 
 // replace github.com/wailsapp/wails/v2 v2.15.0 => C:\Users\Administrator\go\pkg\mod
